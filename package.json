@@ -1,0 +1,28 @@
+{
+    "name": "pulse-lang",
+    "version": "0.1.0",
+    "description": "Pulse  Reactive Event Language for ESPVM",
+    "main": "src/index.js",
+    "scripts": {
+          "generate": "antlr4 -Dlanguage=JavaScript -visitor -listener -o src/generated grammar/Pulse.g4",
+          "parse": "node src/parse.js",
+          "test": "node test/parse-test.js"
+    },
+    "keywords": [
+          "pulse",
+          "espvm",
+          "antlr",
+          "iot",
+          "reactive",
+          "event-driven",
+          "esp32",
+          "pmachine",
+          "pcode"
+    ],
+    "author": "scobolguy",
+    "license": "MIT",
+    "dependencies": {
+          "antlr4": "^4.13.1"
+    },
+    "devDependencies": {}
+}

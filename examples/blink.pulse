@@ -1,0 +1,36 @@
+// blink.pulse  Minimal Pulse example: blink an LED with a timer
+// This is the "Hello World" of embedded programming.
+
+module blink
+
+config
+  led_pin: int = 2
+  interval: int = 1000
+end
+
+var led_state: bool = false
+
+on startup
+  gpio.mode(config.led_pin, OUTPUT)
+  logging.info("Blink started on pin " + str(config.led_pin))
+end
+
+every config.interval
+  led_state = not led_state
+  if led_state then
+    gpio.write(config.led_pin, 1)
+  else
+    gpio.write(config.led_pin, 0)
+  end
+end
+
+on http GET "/api/status" => get_status
+
+proc get_status(req: request, res: response)
+  respond res status 200 json {
+    led: led_state,
+    pin: config.led_pin,
+    interval: config.interval,
+    uptime: time.uptime()
+  } end
+end

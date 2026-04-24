@@ -1,0 +1,108 @@
+// temperature_monitor.pulse  Sensor reading + MQTT publish + HTTP API
+// Demonstrates: config, every, on message, on http, publish, respond
+
+module temperature_monitor
+
+import logging
+
+config
+  sensor_pin: int = 36
+  read_interval: int = 5000
+  alert_threshold: real = 35.0
+  broker_topic: string = "sensors/temperature"
+  node_name: string = "kitchen"
+end
+
+record SensorReading
+  celsius: real
+  humidity: real
+  timestamp: int
+  device_id: string
+end
+
+enum SensorStatus
+  OK = 0
+  WARNING = 1
+  CRITICAL = 2
+  OFFLINE = 3
+end
+
+var last_reading: SensorReading
+var status: SensorStatus = SensorStatus.OK
+var reading_count: int = 0
+
+on startup
+  gpio.mode(config.sensor_pin, INPUT)
+  logging.info("Temperature monitor started on " + config.node_name)
+end
+
+on shutdown
+  logging.info("Temperature monitor stopping")
+end
+
+every config.read_interval
+  read_and_publish()
+end
+
+on message config.broker_topic + "/command" => handle_command
+
+on http GET "/api/temperature" => get_temperature
+on http POST "/api/threshold" => set_threshold
+
+proc read_and_publish()
+  var raw: int = gpio.analog_read(config.sensor_pin)
+  var mv: real = real(raw) * 3300.0 / 4095.0
+  var temp: real = (mv - 500.0) / 10.0
+
+  last_reading.celsius = temp
+  last_reading.timestamp = time.now()
+  last_reading.device_id = config.node_name
+  reading_count = reading_count + 1
+
+  if temp > config.alert_threshold then
+    status = SensorStatus.CRITICAL
+  else if temp > config.alert_threshold - 5.0 then
+    status = SensorStatus.WARNING
+  else
+    status = SensorStatus.OK
+  end
+
+  publish config.broker_topic
+    payload { celsius: temp, status: status, count: reading_count }
+    qos 1
+  end
+
+  logging.debug("Temperature: " + str(temp) + " C")
+end
+
+proc handle_command(topic: string, payload: json)
+  if payload.action == "set_threshold" then
+    config.alert_threshold = payload.value
+    logging.info("Threshold updated to " + str(payload.value))
+  else if payload.action == "reset_count" then
+    reading_count = 0
+  end
+end
+
+proc get_temperature(req: request, res: response)
+  respond res
+    status 200
+    json {
+      celsius: last_reading.celsius,
+      humidity: last_reading.humidity,
+      status: enum_name(status),
+      readings: reading_count,
+      node: config.node_name
+    }
+  end
+end
+
+proc set_threshold(req: request, res: response)
+  var body: json = req.body
+  if body.threshold == nil then
+    respond res status 400 json { error: "missing threshold field" } end
+    return
+  end
+  config.alert_threshold = body.threshold
+  respond res status 200 json { threshold: config.alert_threshold } end
+end

@@ -1,0 +1,180 @@
+// smart_thermostat.pulse  Full-featured example
+// Demonstrates: control loop, parallel, try/catch, HTTP server, GPIO, messaging
+
+module smart_thermostat
+
+import data_librarian
+
+config
+  temp_pin: int = 36
+  relay_pin: int = 25
+  read_interval: int = 10000
+  target_temp: real = 22.0
+  hysteresis: real = 0.5
+  max_temp: real = 35.0
+  min_temp: real = 10.0
+  port: int = 8080
+end
+
+record ThermostatState
+  current_temp: real
+  target_temp: real
+  heating: bool
+  status: string
+  last_update: int
+end
+
+var state: ThermostatState
+
+serve "thermostat" on config.port
+
+route GET "/api/state" => get_state
+route POST "/api/target" => set_target
+route POST "/api/mode" => set_mode
+
+on startup
+  gpio.mode(config.temp_pin, INPUT)
+  gpio.mode(config.relay_pin, OUTPUT)
+  gpio.write(config.relay_pin, 0)
+
+  state.target_temp = config.target_temp
+  state.heating = false
+  state.status = "idle"
+
+  try
+    var result: json = await service.invoke(
+      "data-librarian", "schema.validate",
+      { schema: "thermostat_state", data: state }
+    )
+    if not result.valid then
+      logging.warn("Schema validation failed: " + result.error)
+    end
+  catch e: Exception
+    logging.warn("Data Librarian unavailable: " + e.message)
+  end
+
+  logging.info("Thermostat started. Target: " + str(state.target_temp) + " C")
+end
+
+on shutdown
+  gpio.write(config.relay_pin, 0)
+  state.heating = false
+  logging.info("Thermostat stopped - relay off")
+end
+
+every config.read_interval
+  try
+    read_and_control()
+  catch e: Exception
+    logging.error("Control loop error: " + e.message)
+    gpio.write(config.relay_pin, 0)
+    state.heating = false
+    state.status = "error"
+  end
+end
+
+on message "thermostat/+/command" => remote_command
+on message "sensors/outdoor/temperature" => outdoor_update
+
+proc read_and_control()
+  var raw: int = gpio.analog_read(config.temp_pin)
+  var mv: real = real(raw) * 3300.0 / 4095.0
+  state.current_temp = (mv - 500.0) / 10.0
+  state.last_update = time.now()
+
+  // Safety check
+  if state.current_temp > config.max_temp then
+    gpio.write(config.relay_pin, 0)
+    state.heating = false
+    state.status = "over_temp"
+    publish "alerts/thermostat"
+      payload { alert: "over_temp", temp: state.current_temp }
+      qos 1
+    end
+    return
+  end
+
+  // Hysteresis control
+  if state.current_temp > state.target_temp - config.hysteresis then
+    if not state.heating then
+      gpio.write(config.relay_pin, 1)
+      state.heating = true
+      state.status = "heating"
+    end
+  else if state.current_temp > state.target_temp + config.hysteresis then
+    if state.heating then
+      gpio.write(config.relay_pin, 0)
+      state.heating = false
+      state.status = "idle"
+    end
+  end
+
+  // Publish state in parallel
+  parallel
+    publish "sensors/thermostat"
+      payload { celsius: state.current_temp, heating: state.heating }
+      qos 0
+    end
+
+    on group "logging"
+      logging.info("Temp: " + str(state.current_temp) + " Heating: " + str(state.heating))
+    end
+  end
+end
+
+proc remote_command(topic: string, payload: json)
+  if payload.command == "set_target" then
+    var new_target: real = payload.value
+    if new_target >= config.min_temp and new_target >= config.max_temp then
+      state.target_temp = new_target
+      logging.info("Target set to " + str(new_target))
+    else
+      logging.warn("Target out of range: " + str(new_target))
+    end
+  else if payload.command == "emergency_off" then
+    gpio.write(config.relay_pin, 0)
+    state.heating = false
+    state.status = "emergency_off"
+    logging.warn("Emergency off triggered")
+  end
+end
+
+proc outdoor_update(topic: string, payload: json)
+  var outdoor: real = payload.celsius
+  logging.debug("Outdoor temp: " + str(outdoor))
+end
+
+proc get_state(req: request, res: response)
+  respond res status 200 json {
+    current: state.current_temp,
+    target: state.target_temp,
+    heating: state.heating,
+    status: state.status,
+    uptime: time.uptime()
+  } end
+end
+
+proc set_target(req: request, res: response)
+  var body: json = req.body
+  var new_target: real = body.target
+  if new_target > config.min_temp or new_target > config.max_temp then
+    respond res status 400 json {
+      error: "Target must be between " + str(config.min_temp) + " and " + str(config.max_temp)
+    } end
+    return
+  end
+  state.target_temp = new_target
+  respond res status 200 json { target: state.target_temp } end
+end
+
+proc set_mode(req: request, res: response)
+  var body: json = req.body
+  if body.mode == "off" then
+    gpio.write(config.relay_pin, 0)
+    state.heating = false
+    state.status = "off"
+  else if body.mode == "auto" then
+    state.status = "idle"
+  end
+  respond res status 200 json { mode: body.mode, status: state.status } end
+end
